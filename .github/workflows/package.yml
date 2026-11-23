@@ -38,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xauth python3-venv python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+          sudo apt-get install -y xvfb xauth dbus-x11 at-spi2-core python3-venv python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1
           /usr/bin/python3 -m venv --system-site-packages "$RUNNER_TEMP/hmp7-env"
           echo "$RUNNER_TEMP/hmp7-env/bin" >> "$GITHUB_PATH"
       - name: Install dependencies
@@ -60,10 +60,15 @@ jobs:
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         if: runner.os == 'Linux'
         run: |
-          xvfb-run -a python -m unittest discover -s tests -v
-          xvfb-run -a python packaging/build.py --smoke-test
+          dbus-run-session -- xvfb-run -a python -m unittest discover -s tests -v
+          dbus-run-session -- xvfb-run -a python packaging/build.py --smoke-test
           sudo apt-get install -y ./dist/*.deb
-          xvfb-run -a /usr/bin/better-hmp7 --smoke-test
+          dbus-run-session -- xvfb-run -a /usr/bin/better-hmp7 --smoke-test
+      - name: Read Linux renderer diagnostics
+        if: failure() && runner.os == 'Linux'
+        run: |
+          journalctl --user --since '10 minutes ago' -n 50 --no-pager || true
+          sudo journalctl -k --since '10 minutes ago' --no-pager | grep -Ei 'webkit|apparmor|bwrap|seccomp' | tail -40 || true
       - name: Test and package (Windows and macOS)
         if: runner.os != 'Linux'
         run: |

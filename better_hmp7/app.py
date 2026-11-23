@@ -1,6 +1,7 @@
 """Open the original dashboard in an offline native window."""
 import base64
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -28,7 +29,19 @@ def create_dashboard(api=None, **options):
     api = api or DesktopAPI()
     settings = dict(width=1480, height=940, min_size=(780, 540), background_color="#f5f7fa")
     settings.update(options)
-    window = webview.create_window("Better HMP7 · 温湿度监测", html=dashboard_html(), js_api=api, **settings)
+    page = dashboard_html()
+    document = None
+    if sys.platform.startswith("linux"):
+        # Give WebKitGTK an absolute file origin for its initial document.
+        document = tempfile.TemporaryDirectory(prefix="better-hmp7-ui-")
+        entry = Path(document.name) / "index.html"
+        entry.write_text(page, encoding="utf-8")
+        settings["url"] = entry.as_uri()
+    else:
+        settings["html"] = page
+    window = webview.create_window("Better HMP7 · 温湿度监测", js_api=api, **settings)
+    if document is not None:
+        window.events.closed += document.cleanup
     api._window = window
     window.events.closing += api._shutdown
     return window
