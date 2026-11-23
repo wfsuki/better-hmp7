@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION = tomllib.loads((ROOT/"pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 ASSETS = ROOT / "packaging/assets"
 APP = "Better HMP7"
+UI_FILES = ("index.html", "style.css", "metrics.js", "chart-view.js", "desktop.js", "xlsx.js", "app.js")
 
 
 def run(*args, **options):
@@ -36,6 +37,20 @@ def collect_notices(dest):
     if python_license is None:
         raise RuntimeError("Python license file missing from the build environment")
     shutil.copy2(python_license,dest/"Python.txt")
+    libraries = {"pywebview", "pythonnet", "clr-loader", "cffi", "pycparser", "bottle", "typing-extensions", "proxy-tools"}
+    for dependency in metadata.distributions():
+        name = dependency.metadata["Name"].lower().replace("_", "-")
+        if name not in libraries and not name.startswith("pyobjc-"):
+            continue
+        entries = [f for f in dependency.files or () if ".dist-info" in str(f) and
+                   (f.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE")))]
+        for index, entry in enumerate(entries):
+            shutil.copy2(dependency.locate_file(entry), dest / f"{name}-{index + 1}.txt")
+        if not entries:
+            (dest / f"{name}-notice.txt").write_text(
+                f"{name} {dependency.version}\n{dependency.metadata.get('Author', '')}\n"
+                + (dependency.metadata.get("License") or dependency.metadata.get("License-Expression") or "")
+                + "\n" + (dependency.read_text("METADATA") or ""), encoding="utf-8")
     dist = metadata.distribution("pyinstaller")
     entry = next(f for f in dist.files if f.name == "COPYING.txt")
     shutil.copy2(dist.locate_file(entry),dest/"PyInstaller.txt")
@@ -50,11 +65,13 @@ def freeze(stage, notices, system):
             "--add-data",f"{ROOT/'better_hmp7/fields.json'}{os.pathsep}better_hmp7",
             "--add-data",f"{ROOT/'better_hmp7/icon.png'}{os.pathsep}better_hmp7",
             "--add-data",f"{notices}{os.pathsep}licenses",
-            "--exclude-module","serial.urlhandler"]
+            "--exclude-module","serial.urlhandler", "--exclude-module", "tkinter"]
+    for file in UI_FILES:
+        args += ["--add-data", f"{ROOT / 'better_hmp7/ui' / file}{os.pathsep}better_hmp7/ui"]
     if system == "Windows":
-        args += ["--icon",ASSETS/"icon.ico"]
+        args += ["--icon",ASSETS/"icon.ico", "--hidden-import", "webview.platforms.edgechromium", "--hidden-import", "webview.platforms.winforms"]
     elif system == "Darwin":
-        args += ["--icon",ASSETS/"icon.icns","--osx-bundle-identifier","org.betterhmp7.desktop"]
+        args += ["--icon",ASSETS/"icon.icns","--osx-bundle-identifier","org.betterhmp7.desktop", "--hidden-import", "webview.platforms.cocoa"]
     run(*args,ROOT/"packaging/entry.py")
     return stage/"bundle"/(name+{"Windows":".exe","Darwin":".app","Linux":""}[system])
 
@@ -87,6 +104,32 @@ def macos(app, dest, stage):
     return package
 
 
+def linux_app(stage, notices):
+    # Use the system Python so GTK and WebKit's native system bindings match.
+    app = stage / "linux-app"
+    public = ROOT / "better_hmp7"
+    target = app / "better_hmp7"
+    (target / "ui").mkdir(parents=True)
+    for name in ("__init__.py", "__main__.py", "app.py", "desktop.py", "catalog.py", "preferences.py", "probe.py", "fields.json", "icon.png"):
+        shutil.copy2(public / name, target / name)
+    for name in UI_FILES:
+        shutil.copy2(public / "ui" / name, target / "ui" / name)
+    shutil.copytree(notices, app / "licenses")
+    for name, package in (("pywebview", "webview"), ("proxy-tools", "proxy_tools"),
+                          ("pyserial", "serial"), ("bottle", "bottle.py"), ("typing-extensions", "typing_extensions.py")):
+        dist = metadata.distribution(name)
+        for entry in dist.files or ():
+            if entry.parts[0] != package or entry.suffix not in {".py", ".js"}:
+                continue
+            target = app / entry
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dist.locate_file(entry), target)
+    launcher = app / "better-hmp7"
+    launcher.write_text("#!/usr/bin/python3\nfrom better_hmp7.app import main\nmain()\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    return app
+
+
 def linux(app, dest, stage):
     arch = subprocess.check_output(["dpkg","--print-architecture"],text=True).strip()
     pkg = stage/"deb"
@@ -106,7 +149,7 @@ def linux(app, dest, stage):
     meta = pkg/"DEBIAN"
     meta.mkdir()
     (meta/"control").write_text(f"Package: better-hmp7\nVersion: {VERSION}\nSection: science\nPriority: optional\nArchitecture: {arch}\n"
-        "Maintainer: Better HMP7 contributors\nDepends: libc6, libx11-6, libxft2, libfontconfig1, libxrender1, libxext6, zlib1g\n"
+        "Maintainer: wfsuki <19591058+wfsuki@users.noreply.github.com>\nDepends: python3 (>= 3.11), python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1\n"
         "Description: Local serial monitor and logger for the Vaisala HMP7.\n",encoding="utf-8")
     package = dest/f"better-hmp7_{VERSION}_{arch}.deb"
     run("dpkg-deb","--root-owner-group","--build",pkg,package)
@@ -116,7 +159,7 @@ def linux(app, dest, stage):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out",type=Path,default=ROOT/"dist")
-    parser.add_argument("--smoke-test",action="store_true",help="Open and close a hidden window in the packaged app")
+    parser.add_argument("--smoke-test",action="store_true",help="Start the packaged dashboard and verify its controls")
     args=parser.parse_args()
     system=platform.system()
     if system not in {"Windows","Darwin","Linux"}:
@@ -131,10 +174,10 @@ def main():
         stage=Path(temp)
         notices=stage/"notices"
         collect_notices(notices)
-        app=freeze(stage, notices, system)
+        app=linux_app(stage, notices) if system == "Linux" else freeze(stage, notices, system)
         if args.smoke_test:
             exe = app if system=="Windows" else app/"Contents/MacOS"/APP if system=="Darwin" else app/"better-hmp7"
-            run(exe,"--smoke-test",timeout=60)
+            run(exe,"--smoke-test",timeout=100)
         if system=="Windows":
             package=windows(app,dest,notices,stage)
         elif system=="Darwin":

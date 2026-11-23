@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "better-hmp7"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local serial desktop monitor for the Vaisala HMP7 probe"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = ["pyserial==3.5", "openpyxl==3.1.5"]
+dependencies = ["pyserial==3.5", "openpyxl==3.1.5", "pywebview==6.2.1"]
 
 [project.optional-dependencies]
 build = ["pyinstaller==6.22.3"]
@@ -21,4 +21,4 @@ better-hmp7 = "better_hmp7.app:main"
 packages = ["better_hmp7"]
 
 [tool.setuptools.package-data]
-better_hmp7 = ["fields.json", "icon.png"]
+better_hmp7 = ["fields.json", "icon.png", "ui/*.html", "ui/*.css", "ui/*.js"]
