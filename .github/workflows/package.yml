@@ -1,0 +1,87 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            id: windows-x64
+          - os: macos-15
+            id: macos-arm64
+          - os: macos-15-intel
+            id: macos-x86_64
+          - os: ubuntu-22.04
+            id: linux-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python -c "import os,tomllib,pathlib; v=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']; assert os.environ['GITHUB_REF_NAME']=='v'+v"
+      - name: Install dependencies
+        run: python -m pip install ".[build]"
+      - name: Prepare Linux desktop build
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth tk libxft2
+      - name: Prepare Windows installer compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compiler = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path -LiteralPath $compiler)) { choco install nsis --yes --no-progress }
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'NSIS compiler missing' }
+          "MAKENSIS=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test and package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a python -m unittest discover -s tests -v
+          xvfb-run -a python packaging/build.py --smoke-test
+      - name: Test and package (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: |
+          python -m unittest discover -s tests -v
+          python packaging/build.py --smoke-test
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: better-hmp7-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: dist
+          pattern: better-hmp7-*
+          merge-multiple: true
+      - name: Attach packages to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "Better HMP7 ${GITHUB_REF_NAME#v}" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
